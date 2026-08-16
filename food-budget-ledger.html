@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Food Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #EFEDE4; }
+  * { box-sizing: border-box; }
+  button { font: inherit; }
+  input { font: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-type="module">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+const PAPER = "#FAF9F4";
+const PAPER_DARK = "#EFEDE4";
+const INK = "#22231F";
+const INK_FAINT = "#8A8779";
+const RULE = "#D9D6C8";
+const RED = "#B23A2E";
+const RED_BG = "#F6E4E1";
+const GREEN = "#31593E";
+const GREEN_BG = "#E3ECE1";
+const GOLD = "#C99A2E";
+
+const STORAGE_KEY = "food-budget-ledger-data";
+
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const DOW = ["S","M","T","W","T","F","S"];
+
+function pad(n) { return n < 10 ? "0" + n : "" + n; }
+function keyFor(y, m, d) { return `${y}-${pad(m + 1)}-${pad(d)}`; }
+function fmt(n) {
+  const sign = n < 0 ? "-" : "";
+  return sign + "$" + Math.abs(n).toFixed(2);
+}
+function uid() { return Math.random().toString(36).slice(2, 10); }
+
+// ---- localStorage-backed replacement for the Claude window.storage API ----
+const storage = {
+  async get(key) {
+    const raw = window.localStorage.getItem(key);
+    return raw === null ? null : { key, value: raw };
+  },
+  async set(key, value) {
+    window.localStorage.setItem(key, value);
+    return { key, value };
+  },
+};
+
+function TornEdge({ flip }) {
+  return (
+    <div
+      style={{
+        height: 10,
+        width: "100%",
+        backgroundImage: `linear-gradient(-45deg, ${PAPER} 6px, transparent 0), linear-gradient(45deg, ${PAPER} 6px, transparent 0)`,
+        backgroundSize: "12px 12px",
+        backgroundPosition: "bottom left",
+        backgroundRepeat: "repeat-x",
+        backgroundColor: INK,
+        transform: flip ? "scaleY(-1)" : "none",
+      }}
+    />
+  );
+}
+
+function App() {
+  const today = new Date();
+  const [year, setYear] = useState(today.getFullYear());
+  const [month, setMonth] = useState(today.getMonth());
+  const [target, setTarget] = useState(10);
+  const [entries, setEntries] = useState({});
+  const [selectedDay, setSelectedDay] = useState(today.getDate());
+  const [loading, setLoading] = useState(true);
+  const [saveError, setSaveError] = useState(false);
+  const [form, setForm] = useState({ type: "grocery", amount: "", note: "" });
+
+  const isCurrentMonth = year === today.getFullYear() && month === today.getMonth();
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await storage.get(STORAGE_KEY);
+        if (res && res.value) {
+          const parsed = JSON.parse(res.value);
+          if (parsed.target) setTarget(parsed.target);
+          if (parsed.entries) setEntries(parsed.entries);
+        }
+      } catch (e) {
+        // no existing data yet, that's fine
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const persist = useCallback(async (nextEntries, nextTarget) => {
+    try {
+      const result = await storage.set(STORAGE_KEY, JSON.stringify({ target: nextTarget, entries: nextEntries }));
+      setSaveError(!result);
+    } catch (e) {
+      setSaveError(true);
+    }
+  }, []);
+
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const firstDow = new Date(year, month, 1).getDay();
+
+  const dayTotal = useCallback(
+    (d) => {
+      const list = entries[keyFor(year, month, d)] || [];
+      return list.reduce((s, e) => s + e.amount, 0);
+    },
+    [entries, year, month]
+  );
+
+  const daysElapsed = isCurrentMonth ? today.getDate() : daysInMonth;
+  const monthSpend = useMemo(() => {
+    let s = 0;
+    for (let d = 1; d <= daysInMonth; d++) s += dayTotal(d);
+    return s;
+  }, [dayTotal, daysInMonth]);
+
+  const targetToDate = target * daysElapsed;
+  const balance = targetToDate - monthSpend;
+  const avgPerDay = daysElapsed > 0 ? monthSpend / daysElapsed : 0;
+
+  function changeMonth(delta) {
+    let m = month + delta;
+    let y = year;
+    if (m < 0) { m = 11; y -= 1; }
+    if (m > 11) { m = 0; y += 1; }
+    setMonth(m);
+    setYear(y);
+    setSelectedDay(1);
+  }
+
+  function addEntry() {
+    const amt = parseFloat(form.amount);
+    if (!amt || amt <= 0) return;
+    const k = keyFor(year, month, selectedDay);
+    const next = {
+      ...entries,
+      [k]: [...(entries[k] || []), { id: uid(), type: form.type, amount: amt, note: form.note.trim() }],
+    };
+    setEntries(next);
+    persist(next, target);
+    setForm({ type: form.type, amount: "", note: "" });
+  }
+
+  function removeEntry(day, id) {
+    const k = keyFor(year, month, day);
+    const next = { ...entries, [k]: (entries[k] || []).filter((e) => e.id !== id) };
+    setEntries(next);
+    persist(next, target);
+  }
+
+  function updateTarget(v) {
+    const n = parseFloat(v);
+    setTarget(v === "" ? "" : n);
+    if (v !== "" && !isNaN(n) && n > 0) persist(entries, n);
+  }
+
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const selectedEntries = entries[keyFor(year, month, selectedDay)] || [];
+  const selectedTotal = selectedEntries.reduce((s, e) => s + e.amount, 0);
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", background: PAPER_DARK, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Mono', monospace", color: INK_FAINT }}>
+        loading ledger…
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: PAPER_DARK, fontFamily: "'IBM Plex Mono', ui-monospace, monospace", color: INK, padding: "24px 12px 60px" }}>
+      <div style={{ maxWidth: 420, margin: "0 auto" }}>
+        <div style={{ background: INK, color: PAPER, borderRadius: "2px 2px 0 0" }}>
+          <div style={{ padding: "20px 20px 16px", textAlign: "center" }}>
+            <div style={{ fontFamily: "'Oswald', sans-serif", letterSpacing: 3, fontSize: 12, opacity: 0.65, textTransform: "uppercase" }}>
+              Food Ledger
+            </div>
+            <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 26, fontWeight: 600, marginTop: 4, letterSpacing: 1 }}>
+              {MONTHS[month].toUpperCase()} {year}
+            </div>
+            <div style={{ marginTop: 14, display: "flex", justifyContent: "space-between", fontSize: 12, borderTop: `1px dashed rgba(250,249,244,0.3)`, paddingTop: 12 }}>
+              <span style={{ opacity: 0.7 }}>DAILY TARGET</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                $
+                <input
+                  value={target}
+                  onChange={(e) => updateTarget(e.target.value)}
+                  style={{ width: 44, background: "transparent", border: "none", borderBottom: "1px solid rgba(250,249,244,0.5)", color: PAPER, fontFamily: "inherit", fontSize: 12, outline: "none" }}
+                  inputMode="decimal"
+                />
+                /day
+              </span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 6 }}>
+              <span style={{ opacity: 0.7 }}>SPENT TO DATE</span>
+              <span>{fmt(monthSpend)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 6 }}>
+              <span style={{ opacity: 0.7 }}>AVG / DAY</span>
+              <span>{fmt(avgPerDay)}</span>
+            </div>
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px dashed rgba(250,249,244,0.3)`, display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: 2 }}>BALANCE</span>
+              <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 22, fontWeight: 700, color: balance >= 0 ? "#8FD19E" : "#F2A79B" }}>
+                {balance >= 0 ? "+" : ""}{fmt(balance)}
+              </span>
+            </div>
+          </div>
+          <TornEdge />
+        </div>
+
+        <div style={{ background: PAPER, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 20px", borderLeft: `1px solid ${RULE}`, borderRight: `1px solid ${RULE}` }}>
+          <button onClick={() => changeMonth(-1)} style={navBtn}>‹ prev</button>
+          <button
+            onClick={() => { setMonth(today.getMonth()); setYear(today.getFullYear()); setSelectedDay(today.getDate()); }}
+            style={{ ...navBtn, color: INK_FAINT, fontSize: 11 }}
+          >
+            today
+          </button>
+          <button onClick={() => changeMonth(1)} style={navBtn}>next ›</button>
+        </div>
+
+        <div style={{ background: PAPER, borderLeft: `1px solid ${RULE}`, borderRight: `1px solid ${RULE}`, padding: "8px 12px 4px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 4 }}>
+            {DOW.map((d, i) => (
+              <div key={i} style={{ textAlign: "center", fontSize: 10, color: INK_FAINT, letterSpacing: 1 }}>{d}</div>
+            ))}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, paddingBottom: 10 }}>
+            {cells.map((d, i) => {
+              if (d === null) return <div key={i} />;
+              const spend = dayTotal(d);
+              const hasEntries = spend > 0;
+              const over = spend > target;
+              const isToday = isCurrentMonth && d === today.getDate();
+              const isSelected = d === selectedDay;
+              let bg = "transparent";
+              let fg = INK;
+              if (hasEntries) {
+                bg = over ? RED_BG : GREEN_BG;
+                fg = over ? RED : GREEN;
+              }
+              return (
+                <button
+                  key={i}
+                  onClick={() => setSelectedDay(d)}
+                  style={{
+                    aspectRatio: "1",
+                    background: bg,
+                    border: isSelected ? `1.5px solid ${INK}` : isToday ? `1.5px solid ${GOLD}` : `1px solid ${RULE}`,
+                    borderRadius: 3,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    cursor: "pointer",
+                    padding: 2,
+                    fontFamily: "inherit",
+                  }}
+                >
+                  <span style={{ fontSize: 11, color: fg, fontWeight: isToday ? 700 : 400 }}>{d}</span>
+                  {hasEntries && (
+                    <span style={{ fontSize: 8, color: fg, marginTop: 1 }}>{Math.round(spend)}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{ background: PAPER, borderLeft: `1px solid ${RULE}`, borderRight: `1px solid ${RULE}`, borderTop: `1px dashed ${RULE}`, padding: "16px 20px 4px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+            <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 14, letterSpacing: 1 }}>
+              {MONTHS[month]} {selectedDay}
+            </span>
+            <span style={{ fontSize: 12, color: selectedTotal > target ? RED : selectedTotal > 0 ? GREEN : INK_FAINT }}>
+              {fmt(selectedTotal)} of {fmt(target || 0)}
+            </span>
+          </div>
+
+          {selectedEntries.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              {selectedEntries.map((e) => (
+                <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, padding: "6px 0", borderBottom: `1px dotted ${RULE}` }}>
+                  <span style={{ color: INK_FAINT, textTransform: "uppercase", fontSize: 10, width: 70 }}>{e.type}</span>
+                  <span style={{ flex: 1, marginLeft: 8, color: e.note ? INK : INK_FAINT }}>{e.note || "—"}</span>
+                  <span style={{ marginRight: 10 }}>{fmt(e.amount)}</span>
+                  <button onClick={() => removeEntry(selectedDay, e.id)} style={{ background: "none", border: "none", color: INK_FAINT, cursor: "pointer", fontSize: 13, lineHeight: 1 }}>✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+            {["grocery", "restaurant"].map((t) => (
+              <button
+                key={t}
+                onClick={() => setForm({ ...form, type: t })}
+                style={{
+                  flex: 1,
+                  padding: "6px 0",
+                  fontSize: 10,
+                  letterSpacing: 1,
+                  textTransform: "uppercase",
+                  fontFamily: "inherit",
+                  border: `1px solid ${form.type === t ? INK : RULE}`,
+                  background: form.type === t ? INK : "transparent",
+                  color: form.type === t ? PAPER : INK_FAINT,
+                  borderRadius: 3,
+                  cursor: "pointer",
+                }}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+            <input
+              placeholder="0.00"
+              value={form.amount}
+              onChange={(e) => setForm({ ...form, amount: e.target.value })}
+              inputMode="decimal"
+              style={{ width: 64, padding: "7px 8px", border: `1px solid ${RULE}`, borderRadius: 3, fontFamily: "inherit", fontSize: 12, background: PAPER }}
+            />
+            <input
+              placeholder="note (optional)"
+              value={form.note}
+              onChange={(e) => setForm({ ...form, note: e.target.value })}
+              onKeyDown={(e) => e.key === "Enter" && addEntry()}
+              style={{ flex: 1, padding: "7px 8px", border: `1px solid ${RULE}`, borderRadius: 3, fontFamily: "inherit", fontSize: 12, background: PAPER }}
+            />
+            <button
+              onClick={addEntry}
+              style={{ padding: "7px 14px", background: INK, color: PAPER, border: "none", borderRadius: 3, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}
+            >
+              add
+            </button>
+          </div>
+        </div>
+
+        <div style={{ background: INK }}>
+          <TornEdge flip />
+          <div style={{ textAlign: "center", padding: "10px 0 18px", color: PAPER, opacity: 0.5, fontSize: 10, letterSpacing: 2 }}>
+            {saveError ? "SAVE FAILED — CHECK BROWSER STORAGE" : "THANK YOU FOR BUDGETING"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const navBtn = {
+  background: "none",
+  border: "none",
+  fontFamily: "inherit",
+  fontSize: 12,
+  color: INK,
+  cursor: "pointer",
+  padding: "4px 8px",
+};
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
