@@ -19,6 +19,9 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 
 <script type="text/babel" data-type="module">
 const { useState, useEffect, useMemo, useCallback } = React;
@@ -47,15 +50,29 @@ function fmt(n) {
 }
 function uid() { return Math.random().toString(36).slice(2, 10); }
 
-// ---- localStorage-backed replacement for the Claude window.storage API ----
-const storage = {
-  async get(key) {
-    const raw = window.localStorage.getItem(key);
-    return raw === null ? null : { key, value: raw };
+// ---- Firebase: replace with your own project's config ----
+// Firebase console > Project settings > General > Your apps > Web app > SDK setup and config
+const firebaseConfig = {
+  apiKey: "AIzaSyC2ox-XQ6XMQ98n3aq1atDXDZ1zDLwwIAI",
+  authDomain: "food-budget-b8de0.firebaseapp.com",
+  projectId: "food-budget-b8de0",
+  storageBucket: "food-budget-b8de0.firebasestorage.app",
+  messagingSenderId: "210838561990",
+  appId: "1:210838561990:web:c06c5da80a0ffe7c2363c7",
+};
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+
+// ---- Firestore-backed ledger storage, one document per signed-in user ----
+const cloudStorage = {
+  async get(userId) {
+    const snap = await db.collection("ledgers").doc(userId).get();
+    return snap.exists ? snap.data() : null;
   },
-  async set(key, value) {
-    window.localStorage.setItem(key, value);
-    return { key, value };
+  async set(userId, data) {
+    await db.collection("ledgers").doc(userId).set(data);
+    return true;
   },
 };
 
@@ -76,7 +93,89 @@ function TornEdge({ flip }) {
   );
 }
 
-function App() {
+const inputStyle = {
+  width: "100%",
+  padding: "9px 10px",
+  border: `1px solid ${RULE}`,
+  borderRadius: 3,
+  fontFamily: "inherit",
+  fontSize: 13,
+  background: PAPER,
+};
+
+function LoginScreen() {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError("");
+    setBusy(true);
+    try {
+      if (mode === "login") {
+        await auth.signInWithEmailAndPassword(email, password);
+      } else {
+        await auth.createUserWithEmailAndPassword(email, password);
+      }
+    } catch (err) {
+      setError(err.message.replace(/^Firebase:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: PAPER_DARK, fontFamily: "'IBM Plex Mono', ui-monospace, monospace", color: INK, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <form onSubmit={submit} style={{ width: "100%", maxWidth: 340, background: PAPER, border: `1px solid ${RULE}`, borderRadius: 3, padding: "28px 24px" }}>
+        <div style={{ fontFamily: "'Oswald', sans-serif", letterSpacing: 3, fontSize: 12, opacity: 0.65, textTransform: "uppercase", textAlign: "center", marginBottom: 4 }}>
+          Food Ledger
+        </div>
+        <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 20, fontWeight: 600, textAlign: "center", marginBottom: 20 }}>
+          {mode === "login" ? "Sign In" : "Create Account"}
+        </div>
+        <input
+          type="email"
+          placeholder="email"
+          required
+          autoComplete="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          style={inputStyle}
+        />
+        <input
+          type="password"
+          placeholder="password"
+          required
+          minLength={6}
+          autoComplete={mode === "login" ? "current-password" : "new-password"}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          style={{ ...inputStyle, marginTop: 8 }}
+        />
+        {error && <div style={{ color: RED, fontSize: 11, marginTop: 8 }}>{error}</div>}
+        <button
+          type="submit"
+          disabled={busy}
+          style={{ width: "100%", marginTop: 16, padding: "10px 0", background: INK, color: PAPER, border: "none", borderRadius: 3, fontSize: 12, letterSpacing: 1, textTransform: "uppercase", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1, fontFamily: "inherit" }}
+        >
+          {busy ? "…" : mode === "login" ? "Sign In" : "Create Account"}
+        </button>
+        <button
+          type="button"
+          onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); }}
+          style={{ width: "100%", marginTop: 10, padding: "6px 0", background: "none", border: "none", color: INK_FAINT, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}
+        >
+          {mode === "login" ? "need an account? sign up" : "have an account? sign in"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function App({ user }) {
   const today = new Date();
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
@@ -92,11 +191,19 @@ function App() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await storage.get(STORAGE_KEY);
-        if (res && res.value) {
-          const parsed = JSON.parse(res.value);
-          if (parsed.target) setTarget(parsed.target);
-          if (parsed.entries) setEntries(parsed.entries);
+        const data = await cloudStorage.get(user.uid);
+        if (data) {
+          if (data.target) setTarget(data.target);
+          if (data.entries) setEntries(data.entries);
+        } else {
+          // first time this account has synced: bring over any ledger already on this device
+          const raw = window.localStorage.getItem(STORAGE_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed.target) setTarget(parsed.target);
+            if (parsed.entries) setEntries(parsed.entries);
+            await cloudStorage.set(user.uid, parsed);
+          }
         }
       } catch (e) {
         // no existing data yet, that's fine
@@ -104,16 +211,16 @@ function App() {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [user.uid]);
 
   const persist = useCallback(async (nextEntries, nextTarget) => {
     try {
-      const result = await storage.set(STORAGE_KEY, JSON.stringify({ target: nextTarget, entries: nextEntries }));
-      setSaveError(!result);
+      await cloudStorage.set(user.uid, { target: nextTarget, entries: nextEntries });
+      setSaveError(false);
     } catch (e) {
       setSaveError(true);
     }
-  }, []);
+  }, [user.uid]);
 
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const firstDow = new Date(year, month, 1).getDay();
@@ -191,7 +298,13 @@ function App() {
   return (
     <div style={{ minHeight: "100vh", background: PAPER_DARK, fontFamily: "'IBM Plex Mono', ui-monospace, monospace", color: INK, padding: "24px 12px 60px" }}>
       <div style={{ maxWidth: 420, margin: "0 auto" }}>
-        <div style={{ background: INK, color: PAPER, borderRadius: "2px 2px 0 0" }}>
+        <div style={{ background: INK, color: PAPER, borderRadius: "2px 2px 0 0", position: "relative" }}>
+          <button
+            onClick={() => auth.signOut()}
+            style={{ position: "absolute", top: 12, right: 14, background: "none", border: "none", color: PAPER, opacity: 0.5, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", cursor: "pointer", fontFamily: "inherit" }}
+          >
+            sign out
+          </button>
           <div style={{ padding: "20px 20px 16px", textAlign: "center" }}>
             <div style={{ fontFamily: "'Oswald', sans-serif", letterSpacing: 3, fontSize: 12, opacity: 0.65, textTransform: "uppercase" }}>
               Food Ledger
@@ -362,7 +475,7 @@ function App() {
         <div style={{ background: INK }}>
           <TornEdge flip />
           <div style={{ textAlign: "center", padding: "10px 0 18px", color: PAPER, opacity: 0.5, fontSize: 10, letterSpacing: 2 }}>
-            {saveError ? "SAVE FAILED — CHECK BROWSER STORAGE" : "THANK YOU FOR BUDGETING"}
+            {saveError ? "SAVE FAILED — CHECK CONNECTION" : "THANK YOU FOR BEING RESPONSIBLE"}
           </div>
         </div>
       </div>
@@ -380,8 +493,24 @@ const navBtn = {
   padding: "4px 8px",
 };
 
+function Root() {
+  const [authState, setAuthState] = useState({ loading: true, user: null });
+
+  useEffect(() => auth.onAuthStateChanged((user) => setAuthState({ loading: false, user })), []);
+
+  if (authState.loading) {
+    return (
+      <div style={{ minHeight: "100vh", background: PAPER_DARK, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Mono', monospace", color: INK_FAINT }}>
+        loading…
+      </div>
+    );
+  }
+
+  return authState.user ? <App user={authState.user} /> : <LoginScreen />;
+}
+
 const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<App />);
+root.render(<Root />);
 </script>
 </body>
 </html>
